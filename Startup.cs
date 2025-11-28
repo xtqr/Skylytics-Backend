@@ -5,6 +5,7 @@ using System.Reflection;
 using AspNetCoreRateLimit;
 using AspNetCoreRateLimit.Redis;
 using Coflnet.Sky.Core;
+using Coflnet.Sky.Items.Client.Api;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Hosting;
@@ -32,20 +33,18 @@ namespace dev
         public void ConfigureServices(IServiceCollection services)
         {
             services.AddOptions();
-            var redisCon = Configuration["REDIS_HOST"] ?? Configuration["redisCon"];
+            var redisCon = Configuration["REDIS_HOST"] ?? Configuration["redisCon"] ?? "localhost:6379";
             services.AddControllers().AddNewtonsoftJson();
             services.AddSwaggerGen(c =>
             {
                 c.SwaggerDoc("v1", new OpenApiInfo
                 {
                     Version = "v1",
-                    Title = "Skyblock AH history API",
-                    Description = "Consume data we collected easily",
-                    TermsOfService = new Uri("https://coflnet.com/terms"),
+                    Title = "Skylytics - Hypixel Skyblock Auction Tracker API",
+                    Description = "Personal Hypixel Skyblock auction house and bazaar tracker API. Track auctions, bazaar prices, find flips, and analyze market trends.",
                     Contact = new OpenApiContact
                     {
-                        Name = "Äkwav",
-                        Url = new Uri("https://twitter.com/ekwav"),
+                        Name = "Skylytics API",
                     },
                     License = new OpenApiLicense
                     {
@@ -57,33 +56,89 @@ namespace dev
                 // Set the comments path for the Swagger JSON and UI.
                 var xmlFile = $"{Assembly.GetExecutingAssembly().GetName().Name}.xml";
                 var xmlPath = Path.Combine(AppContext.BaseDirectory, xmlFile);
-                c.IncludeXmlComments(xmlPath);
+                if (File.Exists(xmlPath))
+                    c.IncludeXmlComments(xmlPath);
             });
             services.AddSwaggerGenNewtonsoftSupport();
-            services.AddStackExchangeRedisCache(options =>
+            
+            // Redis cache - optional, gracefully handle if not available
+            try
             {
-                options.Configuration = redisCon;
-                options.InstanceName = "SampleInstance";
-            });
+                services.AddStackExchangeRedisCache(options =>
+                {
+                    options.Configuration = redisCon;
+                    options.InstanceName = "Skylytics";
+                });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Redis cache not available: {ex.Message}");
+                services.AddDistributedMemoryCache();
+            }
+            
             services.AddResponseCaching();
 
             services.AddDbContext<HypixelContext>();
             services.AddSingleton<AuctionService>(AuctionService.Instance);
+            
+            // Register ItemDetails service with error handling
+            var itemsBaseUrl = Configuration["ITEMS_BASE_URL"] ?? "http://localhost:5014";
+            try
+            {
+                if (Uri.TryCreate(itemsBaseUrl, UriKind.Absolute, out _))
+                {
+                    services.AddSingleton<IItemsApi>(sp => new ItemsApi(itemsBaseUrl));
+                    services.AddSingleton<ItemDetails>(sp => new ItemDetails(sp.GetRequiredService<IItemsApi>()));
+                }
+                else
+                {
+                    Console.WriteLine($"Invalid ITEMS_BASE_URL: {itemsBaseUrl}. ItemDetails service will not be available.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to register ItemDetails service: {ex.Message}");
+            }
 
-            var redisOptions = ConfigurationOptions.Parse(redisCon);
-            services.AddSingleton<IConnectionMultiplexer>(provider => ConnectionMultiplexer.Connect(redisOptions));
+            // Redis connection - optional
+            try
+            {
+                var redisOptions = ConfigurationOptions.Parse(redisCon);
+                redisOptions.AbortOnConnectFail = false;
+                services.AddSingleton<IConnectionMultiplexer>(provider => ConnectionMultiplexer.Connect(redisOptions));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Redis connection not available: {ex.Message}");
+            }
 
-            // Rate limiting 
-            services.Configure<IpRateLimitOptions>(Configuration.GetSection("IpRateLimiting"));
-            services.Configure<IpRateLimitPolicies>(Configuration.GetSection("IpRateLimitPolicies"));
-            services.AddRedisRateLimiting();
-            services.AddSingleton<IIpPolicyStore, DistributedCacheIpPolicyStore>();
-            services.AddSingleton<IRateLimitCounterStore, DistributedCacheRateLimitCounterStore>();
-            services.AddSingleton<IRateLimitConfiguration, RateLimitConfiguration>();
+            // Rate limiting - disabled for personal use (no payment required)
+            // You can re-enable this if you want to add rate limiting for your own use
+            var enableRateLimiting = Configuration.GetValue<bool>("EnableRateLimiting", false);
+            if (enableRateLimiting)
+            {
+                services.Configure<IpRateLimitOptions>(Configuration.GetSection("IpRateLimiting"));
+                services.Configure<IpRateLimitPolicies>(Configuration.GetSection("IpRateLimitPolicies"));
+                services.AddRedisRateLimiting();
+                services.AddSingleton<IIpPolicyStore, DistributedCacheIpPolicyStore>();
+                services.AddSingleton<IRateLimitCounterStore, DistributedCacheRateLimitCounterStore>();
+                services.AddSingleton<IRateLimitConfiguration, RateLimitConfiguration>();
+            }
 
             services.AddLogging(configure =>
             {
                 configure.AddConsole();
+            });
+
+            // Add CORS for frontend access
+            services.AddCors(options =>
+            {
+                options.AddDefaultPolicy(builder =>
+                {
+                    builder.AllowAnyOrigin()
+                           .AllowAnyMethod()
+                           .AllowAnyHeader();
+                });
             });
         }
 
@@ -102,16 +157,22 @@ namespace dev
             // specifying the Swagger JSON endpoint.
             app.UseSwaggerUI(c =>
             {
-                c.SwaggerEndpoint("/swagger/v1/swagger.json", "My API V1");
+                c.SwaggerEndpoint("/swagger/v1/swagger.json", "Skylytics API V1");
                 c.RoutePrefix = "api";
+                c.DocumentTitle = "Skylytics - Hypixel Skyblock Tracker API";
             });
 
             app.UseRouting();
-
+            app.UseCors();
 
             app.UseResponseCaching();
-            app.UseIpRateLimiting();
-
+            
+            // Only use rate limiting if enabled
+            var enableRateLimiting = Configuration.GetValue<bool>("EnableRateLimiting", false);
+            if (enableRateLimiting)
+            {
+                app.UseIpRateLimiting();
+            }
 
             app.Use(async (context, next) =>
             {
@@ -131,8 +192,8 @@ namespace dev
             {
                 errorApp.Run(async context =>
                 {
-                    context.Response.StatusCode = (int)HttpStatusCode.InternalServerError; ;
-                    context.Response.ContentType = "text/json";
+                    context.Response.StatusCode = (int)HttpStatusCode.InternalServerError;
+                    context.Response.ContentType = "application/json";
 
                     var exceptionHandlerPathFeature =
                         context.Features.Get<IExceptionHandlerPathFeature>();
@@ -145,7 +206,7 @@ namespace dev
                     else
                     {
                         await context.Response.WriteAsync(
-                                        JsonConvert.SerializeObject(new { Slug = "internal_error", Message = "An unexpectedinternal error occured. Please check that your request is valid." }));
+                                        JsonConvert.SerializeObject(new { Slug = "internal_error", Message = "An unexpected internal error occurred. Please check that your request is valid." }));
                     }
                 });
             });
@@ -154,10 +215,24 @@ namespace dev
             {
                 endpoints.MapGet("/", async context =>
                 {
-                    var path = context.Request.Path;
-                    //context.Response.WriteAsync()
-                    //await hypixel.Program.server.AnswerGetRequest();
-                    await context.Response.WriteAsync("Hello World!");
+                    context.Response.ContentType = "application/json";
+                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new 
+                    { 
+                        message = "Welcome to Skylytics API - Hypixel Skyblock Auction Tracker",
+                        version = Coflnet.Sky.Core.Program.Version,
+                        docs = "/api",
+                        endpoints = new 
+                        {
+                            auctions = "/api/auctions",
+                            bazaar = "/api/bazaar",
+                            items = "/api/items",
+                            players = "/api/players",
+                            prices = "/api/prices",
+                            flipper = "/api/flipper",
+                            search = "/api/search",
+                            status = "/api/status"
+                        }
+                    }));
                 });
                 endpoints.MapMetrics();
                 endpoints.MapControllers();
