@@ -81,10 +81,24 @@ namespace dev
             services.AddDbContext<HypixelContext>();
             services.AddSingleton<AuctionService>(AuctionService.Instance);
             
-            // Register ItemDetails service
+            // Register ItemDetails service with error handling
             var itemsBaseUrl = Configuration["ITEMS_BASE_URL"] ?? "http://localhost:5014";
-            services.AddSingleton<IItemsApi>(sp => new ItemsApi(itemsBaseUrl));
-            services.AddSingleton<ItemDetails>(sp => new ItemDetails(sp.GetRequiredService<IItemsApi>()));
+            try
+            {
+                if (Uri.TryCreate(itemsBaseUrl, UriKind.Absolute, out _))
+                {
+                    services.AddSingleton<IItemsApi>(sp => new ItemsApi(itemsBaseUrl));
+                    services.AddSingleton<ItemDetails>(sp => new ItemDetails(sp.GetRequiredService<IItemsApi>()));
+                }
+                else
+                {
+                    Console.WriteLine($"Invalid ITEMS_BASE_URL: {itemsBaseUrl}. ItemDetails service will not be available.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to register ItemDetails service: {ex.Message}");
+            }
 
             // Redis connection - optional
             try

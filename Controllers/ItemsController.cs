@@ -18,7 +18,7 @@ namespace Coflnet.Sky.Api.Controllers
         private readonly HypixelContext _context;
         private readonly ItemDetails _itemDetails;
 
-        public ItemsController(HypixelContext context, ItemDetails itemDetails)
+        public ItemsController(HypixelContext context, ItemDetails itemDetails = null)
         {
             _context = context;
             _itemDetails = itemDetails;
